@@ -1,0 +1,90 @@
+import logging
+import sqlite3
+import asyncio
+from aiogram import Bot, Dispatcher, types, F
+from aiogram.filters import Command
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from threading import Thread
+from flask import Flask
+
+# --- НАСТРОЙКИ ---
+API_TOKEN = '8728353008:AAHeggKttYtJ8xzyFCD6JdrxqES5fAzjo8Q' # Замените на свой токен!
+SPONSORS = ['@blackhihi']   # Замените на свои каналы!
+
+# --- ВЕБ-СЕРВЕР ДЛЯ RENDER ---
+app = Flask('')
+@app.route('/')
+def home(): return "Бот запущен!"
+def run_f(): app.run(host='0.0.0.0', port=8080)
+def keep_alive():
+    t = Thread(target=run_f)
+    t.daemon = True
+    t.start()
+
+# --- БАЗА ДАННЫХ ---
+conn = sqlite3.connect('users.db', check_same_thread=False)
+cursor = conn.cursor()
+cursor.execute('CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, balance INTEGER DEFAULT 0, is_vip INTEGER DEFAULT 0)')
+cursor.execute('CREATE TABLE IF NOT EXISTS ads (id INTEGER PRIMARY KEY AUTOINCREMENT, owner_id INTEGER, link TEXT)')
+conn.commit()
+
+# --- ИНИЦИАЛИЗАЦИЯ ---
+logging.basicConfig(level=logging.INFO)
+bot = Bot(token=API_TOKEN)
+dp = Dispatcher()
+
+# --- ПРОВЕРКА ПОДПИСКИ ---
+async def check_sub(user_id):
+    for ch in SPONSORS:
+        try:
+            m = await bot.get_chat_member(chat_id=ch, user_id=user_id)
+            if m.status in ['left', 'kicked']: return False
+        except: return False
+    return True
+
+# --- ОБРАБОТЧИКИ (aiogram 3.x) ---
+@dp.message(Command("start"))
+async def start_cmd(message: types.Message):
+    cursor.execute("INSERT OR IGNORE INTO users (id) VALUES (?)", (message.from_user.id,))
+    conn.commit()
+    if not await check_sub(message.from_user.id):
+        return await message.answer(f"Подпишись на спонсоров: {', '.join(SPONSORS)}")
+    
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Заработать", callback_data="earn")],
+        [InlineKeyboardButton(text="Профиль", callback_data="profile")]
+    ])
+    await message.answer("Привет! Выбери действие:", reply_markup=kb)
+
+@dp.callback_query(F.data == "profile")
+async def profile_call(call: types.CallbackQuery):
+    cursor.execute("SELECT balance FROM users WHERE id = ?", (call.from_user.id,))
+    res = cursor.fetchone()
+    await call.message.answer(f"Баланс: {res[0]} баллов")
+
+@dp.callback_query(F.data == "earn")
+async def earn_call(call: types.CallbackQuery):
+    cursor.execute("SELECT id, link FROM ads ORDER BY RANDOM() LIMIT 1")
+    ad = cursor.fetchone()
+    if not ad: return await call.message.answer("Заданий нет!")
+    
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Подписаться", url=ad[1])],
+        [InlineKeyboardButton(text="Проверить", callback_data=f"check_{ad[0]}")]
+    ])
+    await call.message.answer("Подпишись:", reply_markup=kb)
+
+@dp.callback_query(F.data.startswith("check_"))
+async def check_call(call: types.CallbackQuery):
+    cursor.execute("UPDATE users SET balance = balance + 1 WHERE id = ?", (call.from_user.id,))
+    conn.commit()
+    await call.answer("Успех! +1 балл")
+    await call.message.delete()
+
+# --- ЗАПУСК ---
+async def main():
+    keep_alive()
+    await dp.start_polling(bot)
+
+if __name__ == '__main__':
+    asyncio.run(main())
